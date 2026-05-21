@@ -324,6 +324,46 @@ async def list_tools() -> list[Tool]:
                 "required": ["pid"]
             }
         ),
+
+        # Herramientas de ventanas
+        Tool(
+            name="list_windows",
+            description="Lista las ventanas abiertas del sistema",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="get_active_window",
+            description="Obtiene información de la ventana activa actual",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="switch_to_window",
+            description="Cambia a una ventana específica por su título o nombre",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "window_name": {
+                        "type": "string",
+                        "description": "Nombre o parte del título de la ventana"
+                    }
+                },
+                "required": ["window_name"]
+            }
+        ),
+        Tool(
+            name="switch_to_next_window",
+            description="Cambia a la siguiente ventana del sistema",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
     ]
 
 
@@ -429,23 +469,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
         # Herramientas de captura de pantalla
         elif name == "screenshot":
             region = arguments.get("region")
+            save_path = arguments.get("save_path") or "/tmp/screenshot.png"
             
-            if region:
-                screenshot = pyautogui.screenshot(
-                    region=(region["x"], region["y"], region["width"], region["height"])
-                )
-            else:
-                screenshot = pyautogui.screenshot()
-            
-            # Guardar si se especifica ruta
-            save_path = arguments.get("save_path")
-            if save_path:
+            # Intentar con grim (Wayland) primero
+            try:
+                if region:
+                    subprocess.run([
+                        "grim", "-g",
+                        f"{region['x']},{region['y']} {region['width']}x{region['height']}",
+                        save_path
+                    ], check=True)
+                else:
+                    subprocess.run(["grim", save_path], check=True)
+            except Exception:
+                # Fallback a pyautogui (X11)
+                if region:
+                    screenshot = pyautogui.screenshot(
+                        region=(region["x"], region["y"], region["width"], region["height"])
+                    )
+                else:
+                    screenshot = pyautogui.screenshot()
                 screenshot.save(save_path)
             
-            # Convertir a base64
-            buffer = io.BytesIO()
-            screenshot.save(buffer, format="PNG")
-            img_base64 = base64.b64encode(buffer.getvalue()).decode()
+            with open(save_path, "rb") as f:
+                img_base64 = base64.b64encode(f.read()).decode()
             
             return [
                 ImageContent(
@@ -536,6 +583,62 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
             
             return [TextContent(type="text", text=f"Proceso {pid} terminado")]
         
+        # Herramientas de ventanas
+        elif name == "list_windows":
+            result = subprocess.run(
+                ["xdotool", "search", "--name", "."],
+                capture_output=True,
+                text=True
+            )
+            window_ids = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+            windows = []
+            for wid in window_ids:
+                name_result = subprocess.run(
+                    ["xdotool", "getwindowname", wid],
+                    capture_output=True,
+                    text=True
+                )
+                title = name_result.stdout.strip()
+                if title:
+                    windows.append({
+                        "id": wid,
+                        "title": title
+                    })
+            return [TextContent(type="text", text=json.dumps(windows, indent=2))]
+        
+        elif name == "get_active_window":
+            result = subprocess.run(
+                ["xdotool", "getactivewindow", "getwindowname"],
+                capture_output=True,
+                text=True
+            )
+            active_id = subprocess.run(
+                ["xdotool", "getactivewindow"],
+                capture_output=True,
+                text=True
+            )
+            return [TextContent(type="text", text=json.dumps({
+                "id": active_id.stdout.strip(),
+                "title": result.stdout.strip()
+            }, indent=2))]
+        
+        elif name == "switch_to_window":
+            window_name = arguments["window_name"]
+            result = subprocess.run(
+                ["xdotool", "search", "--name", window_name],
+                capture_output=True,
+                text=True
+            )
+            window_ids = [wid.strip() for wid in result.stdout.strip().split('\n') if wid.strip()]
+            if window_ids:
+                subprocess.run(["xdotool", "windowactivate", "--sync", window_ids[0]])
+                return [TextContent(type="text", text=f"Cambiado a ventana: {window_name}")]
+            return [TextContent(type="text", text=f"No se encontró ventana: {window_name}")]
+        
+        elif name == "switch_to_next_window":
+            subprocess.run(["xdotool", "key", "alt+Tab"])
+            return [TextContent(type="text", text="Cambiado a siguiente ventana")]
+        
         else:
             return [TextContent(type="text", text=f"Herramienta desconocida: {name}")]
     
@@ -555,5 +658,9 @@ async def main():
         )
 
 
-if __name__ == "__main__":
+def main_sync():
+    """Wrapper síncrono para el entry point."""
     asyncio.run(main())
+
+if __name__ == "__main__":
+    main_sync()
